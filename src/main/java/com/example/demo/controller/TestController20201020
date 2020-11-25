@@ -1,0 +1,241 @@
+package com.example.demo.controller;
+
+
+import ch.qos.logback.classic.pattern.ThrowableHandlingConverter;
+import com.alibaba.fastjson.JSONArray;
+import com.example.demo.Service.TestService;
+import com.example.demo.common.GetApiParam;
+import com.example.demo.common.MyThread;
+import com.inspur.cloud.apig.sdk.util.AppSign;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import org.apache.poi.util.IOUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import com.alibaba.fastjson.JSONObject;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.ResponseBody;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.*;
+import java.net.URL;
+import java.net.URLConnection;
+import java.util.*;
+
+import static java.lang.System.in;
+
+/**
+ * Created by liulei03 on 2020/8/10.
+ */
+@Controller
+@Api(value="机构名识别接口调用",tags = "机构名识别接口调用类",description = "Ray")
+@RequestMapping("/demo")
+public class TestController {
+
+    @Autowired
+    @Qualifier("ds1JdbcTemplate")
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    @Qualifier("ds3JdbcTemplate")
+    private JdbcTemplate clickhouseJdbcTemplate;
+
+    @Autowired
+    TestService testService;
+
+    @ApiOperation(value="调用方法",notes = "测试index")
+    @RequestMapping(value="/index",method= RequestMethod.GET)
+    public String index() throws Exception {
+        //调用接口分析
+        this.getEnt();
+        //数据清理
+        String sql = "delete from yuqing_ent_1019 where id not in (select id from yuqing_ent_1019 ENTNAME like '%公司%' or  ENTNAME like '%集团%' or  ENTNAME like '%馆%' or  ENTNAME like '%餐厅%' or  ENTNAME like '%店%' or  ENTNAME like '%厂%') ";
+        this.dataClean(sql);
+        //企业名称和ID匹配
+        String matchSql = "select count(*)num from yuqing_ent a inner join jg_jgdx_qyjbxx b on a.ENTNAME =b.ENTNAME; ";
+        List<Map<String,Object>> list = this.entIdMatch(matchSql);
+        return "/page/npl/index.html";
+    }
+
+    /**
+     * 调用接口
+     * @throws Exception
+     */
+    public void getEnt() throws Exception {
+        String url = "http://10.110.10.23:8095/nlp-cs-ner/nlp/annotators/orgner";
+        JSONArray conList = this.getContext();
+        System.out.println("###################总共处理数据"+conList.size()+"条#####################");
+        if(conList.size()>0){
+            ArrayList mapList = new ArrayList();
+            for(int i=0;i<conList.size();i++){
+                Map<String,List> map =new HashMap<>();
+                ArrayList list = new ArrayList();
+                System.out.println("*****************第"+(i+1)+"次请求接口*****************");
+                String itemId = conList.getJSONObject(i).getString("id");
+                String influence = conList.getJSONObject(i).getString("influence");
+                JSONObject jsonObject =conList.getJSONObject(i).getJSONObject("content");
+                String result = this.doHttpPost(url,jsonObject);
+                JSONObject word = JSONObject.parseObject(result);
+                JSONArray recongList = JSONArray.parseArray(word.get("words").toString());
+                String insertValueSql = "";
+                for(int n=0;n<recongList.size();n++){
+                    JSONObject obj = JSONObject.parseObject(recongList.get(n).toString());
+                    if(!obj.isEmpty()){
+                        //企业名称
+                        String name = obj.getString("word");
+                        String id = UUID.randomUUID().toString();
+                        insertValueSql+="('"+id+"','"+itemId+"','"+name+"','"+influence+"'),";
+                        list.add(name);
+                    }
+                }
+                if(list.size()>0){
+                    //保存数据库
+                    int insert = this.insertEntName(insertValueSql);
+                    System.out.println("第"+i+"次插入数据库成功");
+                    map.put(itemId,list);
+                    mapList.add(map);
+                    System.out.println(mapList);
+                }else{
+                    continue;
+                }
+            }
+        }
+    }
+
+    /**
+     * 接口调用方法
+     * @param URL
+     * @param jsonInfo
+     * @return
+     * @throws Exception
+     */
+    @ApiOperation("请求接口获取返回信息")
+    public static String doHttpPost(String URL,JSONObject jsonInfo) throws Exception {
+        System.out.println("登录接口发起的数据:" + jsonInfo);
+        InputStream instr = null;
+        try {
+            byte[] jsonData = jsonInfo.toString().getBytes("utf-8");
+            URL url = new URL(URL);
+            URLConnection urlCon = url.openConnection();
+            urlCon.setDoOutput(true);//可以发生信息到URLConnection
+            urlCon.setDoInput(true);//可以接受来自URLConnection的输入
+            urlCon.setUseCaches(false);
+            //SDK调用API
+            //Map<String,String> headers = AppSign.appSign("160125995737833","6616a90ca918064830a38f21c8260cc9755bada4");
+            //String xAuthTime = headers.get("x-auth-time");
+            //String xAuthAppKey = headers.get("x-auth-app-key");
+            //String xAuthSign= headers.get("x-auth-sign");
+            //urlCon.setRequestProperty("X-Auth-App-Key",xAuthAppKey);
+            //urlCon.setRequestProperty("X-Auth-time",xAuthTime);
+            //urlCon.setRequestProperty("X-Auth-Sign",xAuthSign);
+            urlCon.setRequestProperty("content-Type", "application/json");//设置请求头
+            urlCon.setRequestProperty("charset", "utf-8");
+            urlCon.setRequestProperty("Content-length",String.valueOf(jsonData.length));
+            //System.out.println("登录接口所传参数长度："+String.valueOf(jsonData.length));
+            DataOutputStream printout = new DataOutputStream(urlCon.getOutputStream());
+            printout.write(jsonData);
+            printout.flush();
+            printout.close();
+            instr = urlCon.getInputStream();
+            byte[] bis = IOUtils.toByteArray(instr);
+            String ResponseString = new String(bis, "UTF-8");
+            if ((ResponseString == null) || ("".equals(ResponseString.trim()))) {
+                System.out.println("登陆接口返回空");
+            }
+            System.out.println("登录接口返回数据为:" + ResponseString);
+            return ResponseString;
+
+        } catch (Error err) {
+            System.out.println("登录接口发送的地址=" + URL + "登录接口发送的数据：" + jsonInfo + "登录接口发送数据失败：" + err.getMessage());
+            //e.printStackTrace();
+            throw new Exception( err.getMessage());
+        } finally {
+            try {
+                instr.close();
+
+            } catch (Exception ex) {
+                return "{'words':[{},{}]}";
+            }
+        }
+    }
+
+    /**
+     * 获取处理文本
+     * @return
+     */
+    @ApiOperation("获取请求文本")
+    public JSONArray getContext(){
+        JSONArray conList = new JSONArray();
+        List<Map<String,Object>> list = jdbcTemplate.queryForList("select  id,content,influence from yuqing where emotional='负面' ; ");
+        if(list.size()>0){
+            for(int i=0;i<list.size();i++){
+                Map<String,Object> map = list.get(i);
+                JSONObject jsonobject = new JSONObject();
+                JSONObject content =new JSONObject();
+                String textCon = map.get("content").toString();
+                content.put("text",textCon);
+                content.put("lang","Chinese");
+                content.put("access_token","123456");
+                content.put("output_format","json");
+                jsonobject.put("content",content);
+                jsonobject.put("id",map.get("id").toString());
+                jsonobject.put("influence",map.get("influence").toString());
+                conList.add(jsonobject);
+            }
+        }
+        return conList;
+    }
+
+
+    /**
+     * 插入数据库
+     * @param insertValueSql
+     * @return
+     */
+    @ApiOperation("保存至数据库")
+    public int insertEntName(String insertValueSql){
+        insertValueSql = insertValueSql.substring(0,insertValueSql.length()-1);
+        System.out.println("插入语句为："+insertValueSql);
+        int insert = jdbcTemplate.update("insert into yuqing_ent_1019(ID,ITEMID,ENTNAME,INFLUENCE) values "+insertValueSql);
+        return insert;
+    }
+
+    /**
+     * 清理数据
+     * @param sql
+     */
+    public void dataClean(String sql){
+        jdbcTemplate.execute(sql);
+    }
+
+    /**
+     * 企业名称和统一社会信用代码匹配
+     * @param sql
+     * @return
+     */
+    public List<Map<String,Object>> entIdMatch(String sql){
+        List<Map<String,Object>> list  = clickhouseJdbcTemplate.queryForList(sql);
+        return list;
+    }
+
+
+
+
+
+    @ResponseBody
+    @GetMapping("/getData")
+    @ApiOperation("从数据库获取数据")
+    public JSONObject getData(HttpServletResponse response, HttpServletRequest request){
+        String date= request.getParameter("date");
+        JSONObject json = new JSONObject();
+        List<Map<String,Object>> list= testService.getSersordata();
+        json.put("list",list);
+        System.out.println(date);
+        return json;
+    }
+}
